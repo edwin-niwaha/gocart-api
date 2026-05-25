@@ -78,6 +78,7 @@ django-taggit==6.1.0
 django-tasks==0.6.1
 django-templated-mail==1.1.1
 django-treebeard==4.7.1
+django_celery_results==2.6.0
 djangocms-admin-style==3.3.1
 djangorestframework==3.16.1
 djangorestframework-simplejwt==5.2.2
@@ -159,7 +160,6 @@ prompt_toolkit==3.0.52
 propcache==0.3.2
 proto-plus==1.27.2
 protobuf==5.29.6
-psycopg2==2.9.9
 psycopg2-binary==2.9.10
 pyasn1==0.6.3
 pyasn1_modules==0.4.2

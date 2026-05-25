@@ -11,6 +11,25 @@ from apps.tenants.utils import user_is_tenant_staff
 from .models import Order, OrderItem, OrderStatusEvent
 
 
+def normalize_order_status(status: str) -> str:
+    if status == Order.Status.PAID:
+        return Order.Status.PROCESSING
+    return status
+
+
+def get_order_payment_status(order: Order) -> str:
+    latest_payment = (
+        order.payments.order_by("-paid_at", "-created_at", "-id").first()
+        if getattr(order, "pk", None)
+        else None
+    )
+    if latest_payment is not None:
+        return latest_payment.status
+    if order.status == Order.Status.PAID:
+        return Payment.Status.PAID
+    return Payment.Status.UNPAID
+
+
 def _validate_order_address_owner(serializer, value: CustomerAddress) -> CustomerAddress:
     request = serializer.context["request"]
     instance = getattr(serializer, "instance", None)
@@ -25,6 +44,8 @@ def _validate_order_address_owner(serializer, value: CustomerAddress) -> Custome
 class OrderItemReadSerializer(serializers.ModelSerializer):
     product_image = serializers.SerializerMethodField()
     line_total = serializers.ReadOnlyField()
+    line_cost_total = serializers.ReadOnlyField()
+    gross_profit = serializers.ReadOnlyField()
 
     class Meta:
         model = OrderItem
@@ -39,7 +60,10 @@ class OrderItemReadSerializer(serializers.ModelSerializer):
             "variant_sku",
             "quantity",
             "unit_price",
+            "cost_price_snapshot",
             "line_total",
+            "line_cost_total",
+            "gross_profit",
             "created_at",
             "updated_at",
         )
@@ -87,6 +111,8 @@ class OrderReadSerializer(serializers.ModelSerializer):
     address_region = serializers.SerializerMethodField()
     address_additional_information = serializers.SerializerMethodField()
     is_guest = serializers.SerializerMethodField()
+    order_status = serializers.SerializerMethodField()
+    payment_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -101,6 +127,8 @@ class OrderReadSerializer(serializers.ModelSerializer):
             "customer_phone",
             "is_guest",
             "status",
+            "order_status",
+            "payment_status",
             "delivery_option",
             "description",
             "items_subtotal",
@@ -171,6 +199,12 @@ class OrderReadSerializer(serializers.ModelSerializer):
 
     def get_is_guest(self, obj: Order) -> bool:
         return obj.user_id is None
+
+    def get_order_status(self, obj: Order) -> str:
+        return normalize_order_status(obj.status)
+
+    def get_payment_status(self, obj: Order) -> str:
+        return get_order_payment_status(obj)
 
 
 class OrderCheckoutSerializer(serializers.Serializer):
@@ -288,28 +322,30 @@ class OrderCheckoutSerializer(serializers.Serializer):
         if delivery_option == Order.DeliveryOption.PICKUP_STATION:
             if pickup_station is None:
                 errors["pickup_station_id"] = "Pickup station is required."
+            attrs["address"] = None
         else:
             attrs["pickup_station"] = None
 
         if getattr(request.user, "is_authenticated", False):
-            if address is None:
+            if delivery_option != Order.DeliveryOption.PICKUP_STATION and address is None:
                 errors["address_id"] = "Address is required."
             if errors:
                 raise serializers.ValidationError(errors)
 
-            address = _validate_order_address_owner(self, address)
+            if address is not None:
+                address = _validate_order_address_owner(self, address)
             attrs["customer_name"] = (
                 request.user.get_full_name().strip()
                 or request.user.email
                 or request.user.username
             )
             attrs["customer_email"] = request.user.email
-            attrs["customer_phone"] = address.phone_number
-            attrs["address_street_name"] = address.street_name
-            attrs["address_city"] = address.city
-            attrs["address_area"] = address.area
-            attrs["address_region"] = address.region
-            attrs["address_additional_information"] = address.additional_information
+            attrs["customer_phone"] = getattr(address, "phone_number", "") or attrs.get("customer_phone", "")
+            attrs["address_street_name"] = getattr(address, "street_name", "")
+            attrs["address_city"] = getattr(address, "city", "")
+            attrs["address_area"] = getattr(address, "area", "")
+            attrs["address_region"] = getattr(address, "region", "")
+            attrs["address_additional_information"] = getattr(address, "additional_information", "")
             return attrs
 
         if address is not None:
@@ -319,10 +355,15 @@ class OrderCheckoutSerializer(serializers.Serializer):
             "customer_name": "customer_name",
             "customer_email": "customer_email",
             "customer_phone": "customer_phone",
-            "address_street_name": "street_name",
-            "address_city": "city",
-            "address_region": "region",
         }
+        if delivery_option != Order.DeliveryOption.PICKUP_STATION:
+            required_fields.update(
+                {
+                    "address_street_name": "street_name",
+                    "address_city": "city",
+                    "address_region": "region",
+                }
+            )
         for attr_name, field_name in required_fields.items():
             if not attrs.get(attr_name):
                 errors[field_name] = "This field is required."

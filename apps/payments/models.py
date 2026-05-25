@@ -25,11 +25,13 @@ class Payment(TimeStampedModel):
         MTN = "MTN", "MTN Mobile Money"
 
     class Status(models.TextChoices):
+        UNPAID = "UNPAID", "Unpaid"
         PENDING = "PENDING", "Pending"
         PROCESSING = "PROCESSING", "Processing"
         PAID = "PAID", "Paid"
         FAILED = "FAILED", "Failed"
         REFUNDED = "REFUNDED", "Refunded"
+        PARTIALLY_REFUNDED = "PARTIALLY_REFUNDED", "Partially refunded"
         CANCELLED = "CANCELLED", "Cancelled"
 
     class Currency(models.TextChoices):
@@ -110,7 +112,8 @@ class Payment(TimeStampedModel):
         if not order:
             return
 
-        if self.amount != order.total_price:
+        payment_amount = Decimal(str(self.amount))
+        if payment_amount != order.total_price:
             logger.warning(
                 "Paid payment/order amount mismatch payment_id=%s order_id=%s payment_amount=%s order_total=%s",
                 self.pk,
@@ -124,29 +127,28 @@ class Payment(TimeStampedModel):
                 }
             )
 
-        if order.status in {
-            Order.Status.PAID,
-            Order.Status.SHIPPED,
-            Order.Status.DELIVERED,
-            Order.Status.REFUNDED,
-            Order.Status.CANCELLED,
-        }:
-            return
+        if order.status == Order.Status.AWAITING_PAYMENT:
+            from apps.orders.services import transition_order_status
 
-        previous_status = order.status
-        order.status = Order.Status.PAID
-        order.save(update_fields=["status", "updated_at"])
+            transition_order_status(
+                order=order,
+                new_status=Order.Status.PENDING,
+                changed_by=None,
+                note=f"Payment {self.reference} marked as PAID",
+            )
 
-        from apps.orders.models import OrderStatusEvent
-
-        OrderStatusEvent.objects.create(
-            tenant=order.tenant,
-            order=order,
-            changed_by=None,
-            from_status=previous_status,
-            to_status=Order.Status.PAID,
-            note=f"Payment {self.reference} marked as PAID",
+        from apps.accounting.posting import (
+            queue_order_paid_accounting_event,
+            should_post_order_revenue_on_delivery,
+            should_post_order_revenue_on_payment,
         )
+
+        should_post_now = should_post_order_revenue_on_payment(order) or (
+            should_post_order_revenue_on_delivery(order)
+            and order.status == Order.Status.DELIVERED
+        )
+        if should_post_now:
+            queue_order_paid_accounting_event(order)
 
     def save(self, *args, **kwargs):
         previous_status = None
@@ -172,6 +174,9 @@ class Payment(TimeStampedModel):
 
             if became_paid:
                 self._sync_order_when_paid()
+                from apps.accounting.posting import queue_payment_paid_accounting_event
+
+                queue_payment_paid_accounting_event(self)
 
     def __str__(self):
         return f"{self.reference} - {self.status}"

@@ -14,8 +14,8 @@ from apps.promotions.services import calculate_coupon_discount, get_valid_coupon
 from apps.shipping.services import (
     get_checkout_shipping_fee,
     resolve_checkout_delivery_rate,
-    resolve_checkout_shipping_method,
 )
+from apps.shipping.models import ShippingMethod
 from .models import Payment
 
 logger = logging.getLogger(__name__)
@@ -217,9 +217,6 @@ def build_checkout_summary(
     items_subtotal = get_cart_total_from_items(cart_items)
     discount = Decimal("0.00")
     coupon = None
-    shipping_method = resolve_checkout_shipping_method(
-        delivery_option=delivery_option
-    )
     delivery_rate = resolve_checkout_delivery_rate(
         tenant=tenant,
         delivery_option=delivery_option,
@@ -237,13 +234,18 @@ def build_checkout_summary(
     shipping = get_checkout_shipping_fee(
         tenant=tenant,
         delivery_option=delivery_option,
-        pickup_station=pickup_station,
-        shipping_method=shipping_method,
         address=address,
         address_city=address_city,
         address_region=address_region,
         address_area=address_area,
     )
+    shipping_method = None
+    if delivery_option == Order.DeliveryOption.HOME_DELIVERY:
+        shipping_method = (
+            ShippingMethod.objects.filter(is_active=True, fee=shipping)
+            .order_by("estimated_days", "id")
+            .first()
+        )
     total = max(items_subtotal - discount, Decimal("0.00")) + shipping
 
     return {
@@ -350,7 +352,7 @@ def initiate_mtn_payment(
         phone_number=phone_number,
         status=Payment.Status.PENDING,
         provider_response={
-            "address_id": address.id,
+            "address_id": address.id if address is not None else None,
             "idempotency_key": idempotency_key,
             "cart_snapshot": cart_snapshot,
             "cart_total": str(checkout_summary["items_subtotal"]),
@@ -370,7 +372,7 @@ def initiate_mtn_payment(
         **payment.provider_response,
         "initiate": result["data"],
         "initiate_status_code": result["status_code"],
-        "address_id": address.id,
+        "address_id": address.id if address is not None else None,
         "idempotency_key": idempotency_key,
         "cart_snapshot": cart_snapshot,
         "cart_total": str(checkout_summary["items_subtotal"]),
@@ -459,7 +461,7 @@ def initiate_card_payment(
         status=Payment.Status.PROCESSING,
         checkout_url=getattr(settings, "CARD_PAYMENT_GATEWAY_CHECKOUT_URL", ""),
         provider_response={
-            "address_id": address.id,
+            "address_id": address.id if address is not None else None,
             "idempotency_key": idempotency_key,
             "cart_snapshot": cart_snapshot,
             "cart_total": str(checkout_summary["items_subtotal"]),

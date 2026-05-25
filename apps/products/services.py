@@ -79,6 +79,12 @@ def _build_variant_defaults(
 ) -> dict:
     name = item["name"].strip()
     raw_sku = (item.get("sku") or "").strip()
+    unit_cost = item.get("unit_cost", item.get("cost_price", None))
+    if unit_cost is None:
+        unit_cost = product.cost_price or 0
+    price = item.get("price", item.get("selling_price", None))
+    if price is None:
+        price = product.selling_price or 0
 
     return {
         "tenant": product.tenant,
@@ -90,7 +96,8 @@ def _build_variant_defaults(
             exclude_id=exclude_id,
             reserved_skus=reserved_skus,
         ),
-        "price": item["price"],
+        "price": price,
+        "unit_cost": unit_cost,
         "stock_quantity": item.get("stock_quantity", 0),
         "max_quantity_per_order": item.get("max_quantity_per_order"),
         "is_active": item.get("is_active", True),
@@ -176,6 +183,8 @@ def create_product(*, tenant: Tenant, **validated_data) -> Product:
         ProductVariant.objects.create(
             **_build_variant_defaults(product, item, reserved_skus=reserved_skus)
         )
+
+    sync_product_default_prices_from_first_variant(product)
 
     return product
 
@@ -275,6 +284,7 @@ def update_product(*, instance: Product, **validated_data) -> Product:
                 variant.name = defaults["name"]
                 variant.sku = defaults["sku"]
                 variant.price = defaults["price"]
+                variant.unit_cost = defaults["unit_cost"]
                 variant.stock_quantity = defaults["stock_quantity"]
                 variant.max_quantity_per_order = defaults["max_quantity_per_order"]
                 variant.is_active = defaults["is_active"]
@@ -292,4 +302,24 @@ def update_product(*, instance: Product, **validated_data) -> Product:
                 )
                 kept_variant_ids.append(variant.id)
 
+        sync_product_default_prices_from_first_variant(instance)
+
     return instance
+
+
+def sync_product_default_prices_from_first_variant(product: Product) -> None:
+    first_variant = product.variants.order_by("sort_order", "price", "id").first()
+    if first_variant is None:
+        return
+
+    updates: list[str] = []
+    if product.selling_price != first_variant.price:
+        product.selling_price = first_variant.price
+        updates.append("selling_price")
+    if product.cost_price != first_variant.unit_cost:
+        product.cost_price = first_variant.unit_cost
+        updates.append("cost_price")
+
+    if updates:
+        updates.append("updated_at")
+        product.save(update_fields=updates)

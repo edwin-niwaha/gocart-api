@@ -1,5 +1,6 @@
 from django.utils import timezone
 
+from apps.tenants.models import TenantMembership
 from .models import Notification
 
 
@@ -49,6 +50,52 @@ def send_order_notification(*, user, order, title: str, message: str) -> Notific
         message=message,
         data={"order_slug": order.slug},
     )
+
+
+def tenant_order_admin_users(*, tenant):
+    admin_roles = {
+        TenantMembership.Role.SUPER_ADMIN,
+        TenantMembership.Role.TENANT_OWNER,
+        TenantMembership.Role.TENANT_ADMIN,
+        TenantMembership.Role.MANAGER,
+    }
+    seen = set()
+    for membership in (
+        TenantMembership.objects.filter(
+            tenant=tenant,
+            role__in=admin_roles,
+            is_active=True,
+            user__is_active=True,
+        )
+        .select_related("user")
+        .order_by("user_id")
+    ):
+        if membership.user_id in seen:
+            continue
+        seen.add(membership.user_id)
+        yield membership.user
+
+
+def send_pending_order_admin_notifications(*, order) -> int:
+    created = 0
+    title = "Pending order received"
+    message = f"Order {order.slug} is pending confirmation."
+    for user in tenant_order_admin_users(tenant=order.tenant):
+        create_notification(
+            user=user,
+            tenant=order.tenant,
+            notification_type=Notification.NotificationType.ORDER,
+            title=title,
+            message=message,
+            data={
+                "type": "pending_order",
+                "order_id": order.id,
+                "order_slug": order.slug,
+                "order_status": order.status,
+            },
+        )
+        created += 1
+    return created
 
 
 def send_payment_notification(*, user, payment, title: str, message: str) -> Notification:

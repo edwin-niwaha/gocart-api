@@ -1,8 +1,12 @@
 from django.urls import include, path
+from rest_framework import status
 from rest_framework.routers import DefaultRouter
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from apps.addresses import views as address_views
 from apps.analytics import views as analytics_views
+from apps.accounting import views as accounting_views
 from apps.cart import views as cart_views
 from apps.common import views as common_views
 from apps.notifications import views as notification_views
@@ -32,9 +36,7 @@ router.register("ratings", review_views.ProductRatingViewSet, basename="ratings"
 router.register("wishlist", wishlist_views.WishlistViewSet, basename="wishlist")
 router.register("wishlist-items", wishlist_views.WishlistItemViewSet, basename="wishlist-items")
 router.register("addresses", address_views.CustomerAddressViewSet, basename="addresses")
-router.register("shipping-methods", shipping_views.ShippingMethodViewSet, basename="shipping-methods")
 router.register("pickup-stations", shipping_views.PickupStationViewSet, basename="pickup-stations")
-router.register("delivery-rates", shipping_views.DeliveryRateViewSet, basename="delivery-rates")
 router.register("coupons", promotions_views.CouponViewSet, basename="coupons")
 router.register("notifications", notification_views.NotificationViewSet, basename="notifications")
 router.register("device-tokens", notification_views.DeviceTokenViewSet, basename="device-tokens")
@@ -42,6 +44,30 @@ router.register("contact", common_views.ContactMessageViewSet, basename="contact
 router.register("newsletter", common_views.NewsletterSubscribeViewSet, basename="newsletter")
 router.register("support-messages", common_views.SupportMessageViewSet, basename="support-messages")
 router.register("audit-logs", common_views.AuditLogViewSet, basename="audit-logs")
+router.register("chart-of-accounts", accounting_views.ChartOfAccountViewSet, basename="chart-of-accounts")
+
+
+class RemovedShippingEndpointView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request, *args, **kwargs):
+        return Response(
+            {
+                "count": 0,
+                "next": None,
+                "previous": None,
+                "results": [],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request, *args, **kwargs):
+        return Response(
+            {"detail": "Shipping configuration has been removed. GoCart uses road delivery only."},
+            status=status.HTTP_410_GONE,
+        )
+
 
 urlpatterns = [
     path("tenants/current/branding/", tenant_views.CurrentTenantBrandingView.as_view(), name="tenant-branding"),
@@ -55,6 +81,28 @@ urlpatterns = [
     path("payments/", include("apps.payments.urls")),
     path("admin/payments/", include("apps.payments.admin_urls")),
     path("admin/dashboard/summary/", analytics_views.AdminDashboardSummaryView.as_view(), name="admin-dashboard-summary"),
+    path("accounting/", include("apps.accounting.urls")),
+    path("reports/trial-balance/", accounting_views.TrialBalanceReportView.as_view(), name="report-trial-balance"),
+    path("reports/profit-loss/", accounting_views.ProfitAndLossReportView.as_view(), name="report-profit-loss"),
+    path("reports/balance-sheet/", accounting_views.BalanceSheetReportView.as_view(), name="report-balance-sheet"),
+    path("reports/cash-flow/", accounting_views.CashFlowReportView.as_view(), name="report-cash-flow"),
+    path(
+        "chart-of-accounts/template/",
+        accounting_views.ChartOfAccountsTemplateView.as_view(),
+        name="chart-of-accounts-template",
+    ),
+    path(
+        "chart-of-accounts/export/",
+        accounting_views.ChartOfAccountsExportView.as_view(),
+        name="chart-of-accounts-export",
+    ),
+    path(
+        "chart-of-accounts/preview/",
+        accounting_views.ChartOfAccountsPdfPreviewView.as_view(),
+        name="chart-of-accounts-preview",
+    ),
+    path("shipping-methods/", RemovedShippingEndpointView.as_view(), name="removed-shipping-methods"),
+    path("delivery-rates/", RemovedShippingEndpointView.as_view(), name="removed-delivery-rates"),
     path("checkout/summary/", order_views.CheckoutSummaryView.as_view(), name="checkout-summary"),
     path("checkout/validate/", order_views.CheckoutSummaryView.as_view(), name="checkout-validate"),
     path("", include(router.urls)),

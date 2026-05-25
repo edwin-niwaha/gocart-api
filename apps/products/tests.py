@@ -1,6 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
+from decimal import Decimal
 from rest_framework.test import APIClient
 
 from apps.products.models import Category, Product, ProductImage, ProductVariant
@@ -272,3 +273,53 @@ class ProductRolePermissionTests(TestCase):
         skus = list(product.variants.order_by("sort_order", "id").values_list("sku", flat=True))
         self.assertEqual(len(skus), len(set(skus)))
         self.assertNotEqual(skus[0], "PEARPACK")
+
+    def test_admin_can_create_variants_with_different_prices_and_costs(self):
+        admin = User.objects.create_user(
+            email="admin-product-variant-prices@example.com",
+            username="admin-product-variant-prices",
+            password="secret123",
+        )
+        TenantMembership.objects.create(
+            tenant=self.tenant,
+            user=admin,
+            role=TenantMembership.Role.TENANT_ADMIN,
+        )
+        self.client.force_authenticate(user=admin)
+
+        response = self.client.post(
+            "/api/v1/products/",
+            {
+                "title": "Rice",
+                "category_id": self.category.id,
+                "variants": [
+                    {
+                        "name": "1kg",
+                        "sku": "RICE-1KG",
+                        "price": "6000.00",
+                        "unit_cost": "4200.00",
+                        "stock_quantity": 20,
+                    },
+                    {
+                        "name": "5kg",
+                        "sku": "RICE-5KG",
+                        "selling_price": "28000.00",
+                        "cost_price": "21000.00",
+                        "stock_quantity": 10,
+                    },
+                ],
+            },
+            format="json",
+            HTTP_X_TENANT_SLUG=self.tenant.slug,
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        product = Product.objects.get(slug="rice")
+        one_kg = product.variants.get(sku="RICE-1KG")
+        five_kg = product.variants.get(sku="RICE-5KG")
+        self.assertEqual(one_kg.price, Decimal("6000.00"))
+        self.assertEqual(one_kg.unit_cost, Decimal("4200.00"))
+        self.assertEqual(five_kg.price, Decimal("28000.00"))
+        self.assertEqual(five_kg.unit_cost, Decimal("21000.00"))
+        self.assertEqual(product.selling_price, one_kg.price)
+        self.assertEqual(product.cost_price, one_kg.unit_cost)

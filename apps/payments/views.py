@@ -11,12 +11,15 @@ from rest_framework.views import APIView
 
 from apps.addresses.models import CustomerAddress
 from apps.cart.models import Cart, CartItem
-from apps.orders.models import Order, OrderStatusEvent
+from apps.accounting.posting import (
+    queue_order_paid_accounting_event,
+    should_post_order_revenue_on_payment,
+)
+from apps.orders.models import Order
 from apps.orders.serializers import OrderReadSerializer
 from apps.orders.services import add_order_item, create_order
 from apps.promotions.models import Coupon
 from apps.promotions.services import increment_coupon_usage
-from apps.shipping.models import PickupStation
 from rest_framework import generics
 
 from .models import Payment
@@ -295,53 +298,35 @@ class FinalizePaidOrderView(APIView):
                             "detail": "Paid payment amount does not match the linked order total."
                         }
                     )
-                final_statuses = {
-                    Order.Status.PAID,
-                    Order.Status.SHIPPED,
-                    Order.Status.DELIVERED,
-                    Order.Status.REFUNDED,
-                    Order.Status.CANCELLED,
-                }
-
-                if order.status not in final_statuses:
-                    previous_status = order.status
-                    order.status = Order.Status.PAID
-                    order.save(update_fields=["status", "updated_at"])
-                    OrderStatusEvent.objects.create(
-                        tenant=order.tenant,
-                        order=order,
-                        changed_by=request.user,
-                        from_status=previous_status,
-                        to_status=Order.Status.PAID,
-                        note=f"Payment {payment.reference} finalized",
-                    )
-                    logger.info(
-                        "Paid payment synchronized existing order order_id=%s payment_id=%s from_status=%s user_id=%s tenant_id=%s request_id=%s",
-                        order.id,
-                        payment.id,
-                        previous_status,
-                        request.user.id,
-                        getattr(request.tenant, "id", None),
-                        getattr(request, "id", ""),
-                    )
+                if should_post_order_revenue_on_payment(order):
+                    queue_order_paid_accounting_event(order)
 
                 output = OrderReadSerializer(order, context={"request": request})
                 return Response(
-                    {"order": output.data, "payment_reference": payment.reference},
+                    {
+                        "order": output.data,
+                        "payment_reference": payment.reference,
+                        "payment_status": payment.status,
+                        "payment_provider": payment.provider,
+                    },
                     status=status.HTTP_200_OK,
                 )
 
+            checkout_summary = payment.provider_response.get("checkout_summary") or {}
+            delivery_option = checkout_summary.get("delivery_option") or Order.DeliveryOption.HOME_DELIVERY
             address_id = payment.provider_response.get("address_id")
-            if not address_id:
+            if delivery_option != Order.DeliveryOption.PICKUP_STATION and not address_id:
                 raise ValidationError({"detail": "Address information missing from payment."})
 
-            try:
-                address = CustomerAddress.objects.get(
-                    id=address_id,
-                    user=request.user,
-                )
-            except CustomerAddress.DoesNotExist:
-                raise ValidationError({"detail": "Address not found."})
+            address = None
+            if address_id:
+                try:
+                    address = CustomerAddress.objects.get(
+                        id=address_id,
+                        user=request.user,
+                    )
+                except CustomerAddress.DoesNotExist:
+                    raise ValidationError({"detail": "Address not found."})
 
             cart_items = _get_cart_items_for_user(request.user, request.tenant)
             if not cart_items:
@@ -399,16 +384,13 @@ class FinalizePaidOrderView(APIView):
                 locked_variants[cart_item.id] = variant
 
             # ALWAYS create order here after successful payment and cart verification.
-            checkout_summary = payment.provider_response.get("checkout_summary") or {}
-            delivery_option = checkout_summary.get("delivery_option") or Order.DeliveryOption.HOME_DELIVERY
             pickup_station = None
             pickup_station_id = checkout_summary.get("pickup_station_id")
-
             if delivery_option == Order.DeliveryOption.PICKUP_STATION:
                 if not pickup_station_id:
-                    raise ValidationError(
-                        {"detail": "Pickup station information missing from payment."}
-                    )
+                    raise ValidationError({"detail": "Pickup station information missing from payment."})
+
+                from apps.shipping.models import PickupStation
 
                 pickup_station = PickupStation.objects.filter(
                     Q(tenant=request.tenant) | Q(tenant__isnull=True),
@@ -423,7 +405,7 @@ class FinalizePaidOrderView(APIView):
                 tenant=request.tenant,
                 address=address,
                 description="Placed after successful online payment",
-                status=Order.Status.PAID,
+                status=Order.Status.PENDING,
                 delivery_option=delivery_option,
                 pickup_station=pickup_station,
             )
@@ -450,13 +432,11 @@ class FinalizePaidOrderView(APIView):
                 str(checkout_summary.get("shipping", "0.00"))
             )
             order.recalculate_total_price()
-            order.status = Order.Status.PAID
             order.save(
                 update_fields=[
                     "items_subtotal",
                     "discount_amount",
                     "shipping_fee",
-                    "status",
                     "updated_at",
                 ]
             )
@@ -472,6 +452,8 @@ class FinalizePaidOrderView(APIView):
             payment.tenant = request.tenant
             payment.amount = order.total_price
             payment.save(update_fields=["order", "amount", "tenant", "updated_at"])
+            if should_post_order_revenue_on_payment(order):
+                queue_order_paid_accounting_event(order)
             logger.info(
                 "Payment finalized order_id=%s payment_id=%s user_id=%s tenant_id=%s request_id=%s",
                 order.id,
@@ -483,7 +465,12 @@ class FinalizePaidOrderView(APIView):
 
             output = OrderReadSerializer(order, context={"request": request})
             return Response(
-                {"order": output.data, "payment_reference": payment.reference},
+                {
+                    "order": output.data,
+                    "payment_reference": payment.reference,
+                    "payment_status": payment.status,
+                    "payment_provider": payment.provider,
+                },
                 status=status.HTTP_201_CREATED,
             )
 

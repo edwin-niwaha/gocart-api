@@ -78,6 +78,19 @@ class Product(TimeStampedModel):
     slug = models.SlugField(max_length=255, db_index=True)
 
     description = models.TextField(blank=True)
+    cost_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    selling_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+        db_index=True,
+    )
 
     hero_image = CloudinaryField(
         "product_hero_image",
@@ -163,8 +176,20 @@ class Product(TimeStampedModel):
 
     @property
     def base_price(self):
+        if self.selling_price:
+            return self.selling_price
         first_variant = self.variants.filter(is_active=True).order_by("price").first()  # type: ignore[attr-defined]
         return first_variant.price if first_variant else Decimal("0.00")
+
+    @property
+    def gross_profit_amount(self) -> Decimal:
+        return (self.selling_price or Decimal("0.00")) - (self.cost_price or Decimal("0.00"))
+
+    @property
+    def gross_margin_percent(self) -> Decimal:
+        if not self.selling_price:
+            return Decimal("0.00")
+        return (self.gross_profit_amount / self.selling_price * Decimal("100.00")).quantize(Decimal("0.01"))
 
     @property
     def is_in_stock(self) -> bool:
@@ -240,6 +265,12 @@ class ProductVariant(TimeStampedModel):
         validators=[MinValueValidator(Decimal("0.00"))],
         db_index=True,
     )
+    unit_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
 
     stock_quantity = models.PositiveIntegerField(default=0)
     max_quantity_per_order = models.PositiveIntegerField(null=True, blank=True)
@@ -268,6 +299,32 @@ class ProductVariant(TimeStampedModel):
     @property
     def is_in_stock(self) -> bool:
         return self.stock_quantity > 0
+
+    @property
+    def selling_price(self) -> Decimal:
+        return self.price
+
+    @selling_price.setter
+    def selling_price(self, value) -> None:
+        self.price = value
+
+    @property
+    def cost_price(self) -> Decimal:
+        return self.unit_cost
+
+    @cost_price.setter
+    def cost_price(self, value) -> None:
+        self.unit_cost = value
+
+    @property
+    def gross_profit_amount(self) -> Decimal:
+        return (self.price or Decimal("0.00")) - (self.unit_cost or Decimal("0.00"))
+
+    @property
+    def gross_margin_percent(self) -> Decimal:
+        if not self.price:
+            return Decimal("0.00")
+        return (self.gross_profit_amount / self.price * Decimal("100.00")).quantize(Decimal("0.01"))
 
     def save(self, *args, **kwargs):
         if self.product_id and not self.tenant_id:

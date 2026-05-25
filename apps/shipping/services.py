@@ -3,7 +3,7 @@ from decimal import Decimal
 from rest_framework.exceptions import ValidationError
 
 from apps.orders.models import Order
-from .models import DeliveryRate, ShippingMethod
+from .models import DeliveryRate
 
 
 def _clean_location_part(value) -> str:
@@ -72,33 +72,10 @@ def resolve_checkout_delivery_rate(
     )
 
 
-def resolve_checkout_shipping_method(*, delivery_option: str) -> ShippingMethod | None:
-    if delivery_option != Order.DeliveryOption.HOME_DELIVERY:
-        return None
-
-    queryset = ShippingMethod.objects.filter(is_active=True).order_by(
-        "fee",
-        "estimated_days",
-        "id",
-    )
-    shipping_method = queryset.first()
-
-    if shipping_method is not None and queryset[1:2].exists():
-        logger.warning(
-            "Multiple active shipping methods found for home delivery checkout; "
-            "using shipping_method_id=%s",
-            shipping_method.id,
-        )
-
-    return shipping_method
-
-
 def get_checkout_shipping_fee(
     *,
     tenant=None,
-    delivery_option: str,
-    pickup_station=None,
-    shipping_method: ShippingMethod | None = None,
+    delivery_option: str = Order.DeliveryOption.HOME_DELIVERY,
     address=None,
     address_city: str = "",
     address_region: str = "",

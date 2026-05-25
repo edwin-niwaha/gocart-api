@@ -71,6 +71,46 @@ class OrderTenantCheckoutTests(TestCase):
         self.assertEqual(order.items.count(), 1)
         self.assertEqual(order.items.first().variant, self.variant_a)
 
+    def test_checkout_snapshots_variant_cost_for_profit_reporting(self):
+        self.variant_a.unit_cost = Decimal("600.00")
+        self.variant_a.save(update_fields=["unit_cost"])
+        CartItem.objects.create(cart=self.cart, variant=self.variant_a, quantity=2, unit_price="1000.00")
+
+        response = self.client.post(
+            "/api/v1/orders/checkout/",
+            {"address_id": self.address.id, "payment_method": Payment.Provider.CASH},
+            format="json",
+            HTTP_X_TENANT_SLUG=self.tenant_a.slug,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        order = Order.objects.get(slug=response.data["order"]["slug"])
+        item = order.items.get()
+        self.assertEqual(item.cost_price_snapshot, Decimal("600.00"))
+        self.assertEqual(item.line_cost_total, Decimal("1200.00"))
+        self.assertEqual(item.gross_profit, Decimal("800.00"))
+
+    def test_checkout_snapshots_product_cost_when_variant_cost_is_missing(self):
+        self.product_a.cost_price = Decimal("700.00")
+        self.product_a.save(update_fields=["cost_price"])
+        self.variant_a.unit_cost = Decimal("0.00")
+        self.variant_a.save(update_fields=["unit_cost"])
+        CartItem.objects.create(cart=self.cart, variant=self.variant_a, quantity=2, unit_price="1000.00")
+
+        response = self.client.post(
+            "/api/v1/orders/checkout/",
+            {"address_id": self.address.id, "payment_method": Payment.Provider.CASH},
+            format="json",
+            HTTP_X_TENANT_SLUG=self.tenant_a.slug,
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        order = Order.objects.get(slug=response.data["order"]["slug"])
+        item = order.items.get()
+        self.assertEqual(item.cost_price_snapshot, Decimal("700.00"))
+        self.assertEqual(item.line_cost_total, Decimal("1400.00"))
+        self.assertEqual(item.gross_profit, Decimal("600.00"))
+
     def test_checkout_applies_coupon_and_shipping_to_order_payment_total(self):
         CartItem.objects.create(cart=self.cart, variant=self.variant_a, quantity=2, unit_price="1000.00")
         shipping_method = ShippingMethod.objects.create(
@@ -454,6 +494,110 @@ class OrderStatusTransitionTests(TestCase):
         self.assertEqual(self.order.status, Order.Status.PROCESSING)
         self.assertEqual(self.order.status_events.count(), 1)
 
+    def test_staff_can_confirm_ship_and_deliver_order(self):
+        self.client.force_authenticate(user=self.staff)
+
+        for next_status in (
+            Order.Status.CONFIRMED,
+            Order.Status.PROCESSING,
+            Order.Status.SHIPPED,
+            Order.Status.DELIVERED,
+        ):
+            response = self.client.post(
+                f"/api/v1/orders/{self.order.slug}/transition-status/",
+                {"status": next_status},
+                format="json",
+                HTTP_X_TENANT_SLUG=self.tenant.slug,
+            )
+            self.assertEqual(response.status_code, 200, response.data)
+            self.order.refresh_from_db()
+            self.assertEqual(self.order.status, next_status)
+
+    def test_staff_can_mark_order_delivered_before_payment_is_recognized(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.post(
+            f"/api/v1/orders/{self.order.slug}/transition-status/",
+            {"status": Order.Status.DELIVERED, "note": "Delivered before payment collection"},
+            format="json",
+            HTTP_X_TENANT_SLUG=self.tenant.slug,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.DELIVERED)
+        self.assertEqual(response.data["payment_status"], Payment.Status.UNPAID)
+
+    def test_staff_can_deliver_legacy_paid_order_even_without_paid_payment(self):
+        self.order.status = Order.Status.PAID
+        self.order.save(update_fields=["status", "updated_at"])
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.post(
+            f"/api/v1/orders/{self.order.slug}/transition-status/",
+            {"status": Order.Status.DELIVERED, "note": "Delivered legacy paid order"},
+            format="json",
+            HTTP_X_TENANT_SLUG=self.tenant.slug,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.DELIVERED)
+        self.assertEqual(response.data["payment_status"], Payment.Status.UNPAID)
+
+    def test_paid_transition_is_kept_for_legacy_clients(self):
+        self.order.status = Order.Status.PROCESSING
+        self.order.save(update_fields=["status", "updated_at"])
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.post(
+            f"/api/v1/orders/{self.order.slug}/transition-status/",
+            {"status": Order.Status.PAID},
+            format="json",
+            HTTP_X_TENANT_SLUG=self.tenant.slug,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+        self.assertEqual(response.data["order_status"], Order.Status.PROCESSING)
+
+    def test_cancel_unpaid_order(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.post(
+            f"/api/v1/orders/{self.order.slug}/transition-status/",
+            {"status": Order.Status.CANCELLED},
+            format="json",
+            HTTP_X_TENANT_SLUG=self.tenant.slug,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.CANCELLED)
+
+    def test_cancel_paid_order_keeps_payment_paid_for_refund_handling(self):
+        Payment.objects.create(
+            tenant=self.tenant,
+            user=self.customer,
+            order=self.order,
+            provider=Payment.Provider.MTN,
+            status=Payment.Status.PAID,
+            amount="0.00",
+            currency=Payment.Currency.UGX,
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.post(
+            f"/api/v1/orders/{self.order.slug}/transition-status/",
+            {"status": Order.Status.CANCELLED},
+            format="json",
+            HTTP_X_TENANT_SLUG=self.tenant.slug,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        payment = self.order.payments.get()
+        self.assertEqual(self.order.status, Order.Status.CANCELLED)
+        self.assertEqual(payment.status, Payment.Status.PAID)
+
     def test_customer_cannot_transition_order_status(self):
         self.client.force_authenticate(user=self.customer)
         response = self.client.post(
@@ -468,7 +612,7 @@ class OrderStatusTransitionTests(TestCase):
         self.client.force_authenticate(user=self.staff)
         response = self.client.post(
             f"/api/v1/orders/{self.order.slug}/transition-status/",
-            {"status": Order.Status.DELIVERED},
+            {"status": Order.Status.REFUNDED},
             format="json",
             HTTP_X_TENANT_SLUG=self.tenant.slug,
         )
@@ -476,7 +620,7 @@ class OrderStatusTransitionTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(
             response.data["detail"],
-            "Cannot transition order from PENDING to DELIVERED.",
+            "Cannot transition order from PENDING to REFUNDED.",
         )
         self.assertEqual(response.data["code"], "validation_error")
 

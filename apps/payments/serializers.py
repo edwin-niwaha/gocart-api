@@ -9,6 +9,12 @@ from apps.shipping.models import PickupStation
 from .models import Payment
 
 
+def normalize_order_status(status: str) -> str:
+    if status == Order.Status.PAID:
+        return Order.Status.PROCESSING
+    return status
+
+
 class PaymentCreateSerializer(serializers.ModelSerializer):
     order = serializers.PrimaryKeyRelatedField(
         queryset=Order.objects.all()
@@ -58,7 +64,7 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
 
 
 class MTNInitiatePaymentSerializer(serializers.Serializer):
-    address_id = serializers.IntegerField(min_value=1)
+    address_id = serializers.IntegerField(min_value=1, required=False)
     phone_number = serializers.CharField(max_length=20)
     delivery_option = serializers.ChoiceField(
         choices=Order.DeliveryOption.choices,
@@ -107,30 +113,30 @@ class MTNInitiatePaymentSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         request = self.context["request"]
-        address_id = attrs["address_id"]
+        address_id = attrs.get("address_id")
         delivery_option = attrs.get(
             "delivery_option",
             Order.DeliveryOption.HOME_DELIVERY,
         )
         pickup_station = attrs.get("pickup_station")
-
-        try:
-            address = CustomerAddress.objects.get(
-                id=address_id,
-                user=request.user,
-            )
-        except CustomerAddress.DoesNotExist:
-            raise serializers.ValidationError(
-                {"address_id": "Address not found."}
-            )
+        address = None
 
         if delivery_option == Order.DeliveryOption.PICKUP_STATION:
             if pickup_station is None:
-                raise serializers.ValidationError(
-                    {"pickup_station_id": "Pickup station is required."}
-                )
+                raise serializers.ValidationError({"pickup_station_id": "Pickup station is required."})
         else:
+            if not address_id:
+                raise serializers.ValidationError({"address_id": "Address is required."})
             attrs["pickup_station"] = None
+            try:
+                address = CustomerAddress.objects.get(
+                    id=address_id,
+                    user=request.user,
+                )
+            except CustomerAddress.DoesNotExist:
+                raise serializers.ValidationError(
+                    {"address_id": "Address not found."}
+                )
 
         self.context["address_instance"] = address
         return attrs
@@ -140,7 +146,7 @@ class MTNInitiatePaymentSerializer(serializers.Serializer):
 
 
 class CardInitiatePaymentSerializer(serializers.Serializer):
-    address_id = serializers.IntegerField(min_value=1)
+    address_id = serializers.IntegerField(min_value=1, required=False)
     delivery_option = serializers.ChoiceField(
         choices=Order.DeliveryOption.choices,
         required=False,
@@ -182,12 +188,13 @@ class CardInitiatePaymentSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         request = self.context["request"]
-        address_id = attrs["address_id"]
+        address_id = attrs.get("address_id")
         delivery_option = attrs.get(
             "delivery_option",
             Order.DeliveryOption.HOME_DELIVERY,
         )
         pickup_station = attrs.get("pickup_station")
+        address = None
         now = timezone.now()
         expiry_year = attrs.get("expiry_year")
         expiry_month = attrs.get("expiry_month")
@@ -209,35 +216,39 @@ class CardInitiatePaymentSerializer(serializers.Serializer):
                 }
             )
 
-        try:
-            address = CustomerAddress.objects.get(
-                id=address_id,
-                user=request.user,
-            )
-        except CustomerAddress.DoesNotExist:
-            raise serializers.ValidationError(
-                {"address_id": "Address not found."}
-            )
-
         if delivery_option == Order.DeliveryOption.PICKUP_STATION:
             if pickup_station is None:
-                raise serializers.ValidationError(
-                    {"pickup_station_id": "Pickup station is required."}
-                )
+                raise serializers.ValidationError({"pickup_station_id": "Pickup station is required."})
         else:
+            if not address_id:
+                raise serializers.ValidationError({"address_id": "Address is required."})
             attrs["pickup_station"] = None
+            try:
+                address = CustomerAddress.objects.get(
+                    id=address_id,
+                    user=request.user,
+                )
+            except CustomerAddress.DoesNotExist:
+                raise serializers.ValidationError(
+                    {"address_id": "Address not found."}
+                )
 
         self.context["address_instance"] = address
         return attrs
 
 
 class PaymentStatusSerializer(serializers.ModelSerializer):
+    payment_status = serializers.CharField(source="status", read_only=True)
+    order_status = serializers.SerializerMethodField()
+
     class Meta:
         model = Payment
         fields = [
             "reference",
             "provider",
             "status",
+            "payment_status",
+            "order_status",
             "amount",
             "currency",
             "phone_number",
@@ -249,10 +260,16 @@ class PaymentStatusSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
 
+    def get_order_status(self, obj):
+        if not obj.order_id:
+            return None
+        return normalize_order_status(obj.order.status)
+
 
 class PaymentListSerializer(serializers.ModelSerializer):
     user_email = serializers.SerializerMethodField()
     order_slug = serializers.CharField(source="order.slug", read_only=True)
+    payment_status = serializers.CharField(source="status", read_only=True)
 
     class Meta:
         model = Payment
@@ -264,6 +281,7 @@ class PaymentListSerializer(serializers.ModelSerializer):
             "order_slug",
             "provider",
             "status",
+            "payment_status",
             "currency",
             "amount",
             "phone_number",
@@ -287,7 +305,8 @@ class AdminPaymentSerializer(serializers.ModelSerializer):
     user_email = serializers.SerializerMethodField()
     username = serializers.SerializerMethodField()
     order_slug = serializers.CharField(source="order.slug", read_only=True)
-    order_status = serializers.CharField(source="order.status", read_only=True)
+    order_status = serializers.SerializerMethodField()
+    payment_status = serializers.CharField(source="status", read_only=True)
     tenant_name = serializers.CharField(source="tenant.name", read_only=True)
     tenant_slug = serializers.CharField(source="tenant.slug", read_only=True)
     address_id = serializers.SerializerMethodField()
@@ -308,6 +327,7 @@ class AdminPaymentSerializer(serializers.ModelSerializer):
             "order_status",
             "provider",
             "status",
+            "payment_status",
             "amount",
             "currency",
             "phone_number",
@@ -342,6 +362,11 @@ class AdminPaymentSerializer(serializers.ModelSerializer):
 
     def get_address_id(self, obj):
         return obj.provider_response.get("address_id") if obj.provider_response else None
+
+    def get_order_status(self, obj):
+        if not obj.order_id:
+            return None
+        return normalize_order_status(obj.order.status)
 
     def get_user_email(self, obj):
         return getattr(obj.user, "email", None) or getattr(obj.order, "customer_email", None)

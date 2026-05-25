@@ -128,12 +128,20 @@ class ProductAdmin(TenantScopedAdminMixin):
 
     base_price_display.short_description = "Base price"
 
+    def gross_margin_display(self, obj):
+        return f"{obj.gross_margin_percent}%"
+
+    gross_margin_display.short_description = "Margin"
+
     list_display = (
         "title",
         "tenant",
         "category",
         "hero_preview",
         "base_price_display",
+        "cost_price",
+        "selling_price",
+        "gross_margin_display",
         "variant_count",
         "image_count",
         "featured_badge",
@@ -174,6 +182,8 @@ class ProductAdmin(TenantScopedAdminMixin):
                     "slug",
                     "category",
                     "description",
+                    "cost_price",
+                    "selling_price",
                 ),
                 "description": (
                     "Enter a product description manually."
@@ -229,6 +239,8 @@ class ProductVariantAdmin(TenantScopedAdminMixin):
         "name",
         "sku",
         "price",
+        "unit_cost",
+        "gross_margin_display",
         "stock_quantity",
         "is_active",
         "sort_order",
@@ -238,3 +250,8 @@ class ProductVariantAdmin(TenantScopedAdminMixin):
     search_fields = ("product__title", "tenant__name", "name", "sku")
     autocomplete_fields = ("tenant", "product")
     ordering = ("tenant", "product", "sort_order", "price")
+
+    def gross_margin_display(self, obj):
+        return f"{obj.gross_margin_percent}%"
+
+    gross_margin_display.short_description = "Margin"

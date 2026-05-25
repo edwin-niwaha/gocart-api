@@ -16,9 +16,74 @@ from apps.payments.models import Payment
 from apps.products.models import Category, Product, ProductVariant
 from apps.promotions.models import Coupon
 from apps.shipping.models import DeliveryRate, PickupStation, ShippingMethod
-from apps.tenants.models import Tenant
+from apps.tenants.models import Tenant, TenantMembership
 
 User = get_user_model()
+
+
+class AdminPaymentTenantScopeTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_superuser(
+            email="payments-admin@example.com",
+            username="payments-admin",
+            password="pass123456",
+        )
+        self.tenant = Tenant.objects.create(name="Tenant A", slug="tenant-a", is_active=True)
+        self.other_tenant = Tenant.objects.create(name="Tenant B", slug="tenant-b", is_active=True)
+        TenantMembership.objects.create(
+            tenant=self.tenant,
+            user=self.admin,
+            role=TenantMembership.Role.SUPER_ADMIN,
+        )
+        self.client.force_authenticate(user=self.admin)
+        self.payment = Payment.objects.create(
+            tenant=self.tenant,
+            provider=Payment.Provider.CASH,
+            status=Payment.Status.PENDING,
+            amount="1000.00",
+            currency=Payment.Currency.UGX,
+        )
+        self.other_payment = Payment.objects.create(
+            tenant=self.other_tenant,
+            provider=Payment.Provider.CASH,
+            status=Payment.Status.PENDING,
+            amount="2000.00",
+            currency=Payment.Currency.UGX,
+        )
+
+    def test_admin_payment_list_defaults_to_active_tenant(self):
+        response = self.client.get(
+            "/api/v1/admin/payments/",
+            HTTP_X_TENANT_SLUG=self.tenant.slug,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual([item["id"] for item in response.data], [self.payment.id])
+        self.assertEqual(response.data[0]["tenant_slug"], self.tenant.slug)
+
+    def test_global_admin_can_opt_into_all_tenants(self):
+        response = self.client.get(
+            "/api/v1/admin/payments/",
+            {"all_tenants": "true"},
+            HTTP_X_TENANT_SLUG=self.tenant.slug,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertCountEqual(
+            [item["id"] for item in response.data],
+            [self.payment.id, self.other_payment.id],
+        )
+
+    def test_admin_payment_detail_defaults_to_active_tenant(self):
+        response = self.client.patch(
+            f"/api/v1/admin/payments/{self.other_payment.id}/",
+            {"status": Payment.Status.FAILED},
+            format="json",
+            HTTP_X_TENANT_SLUG=self.tenant.slug,
+        )
+
+        self.assertEqual(response.status_code, 404)
 
 
 class PaymentFinalizeSafetyTests(TestCase):
@@ -114,7 +179,7 @@ class PaymentFinalizeSafetyTests(TestCase):
             HTTP_X_TENANT_SLUG=self.tenant.slug,
         )
 
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 201, response.data)
         payment = Payment.objects.get(reference=response.data["reference"])
         coupon.refresh_from_db()
 
@@ -179,7 +244,7 @@ class PaymentFinalizeSafetyTests(TestCase):
             **headers,
         )
 
-        self.assertEqual(first_response.status_code, 201)
+        self.assertEqual(first_response.status_code, 201, first_response.data)
         self.assertEqual(second_response.status_code, 200)
         self.assertEqual(first_response.data["reference"], second_response.data["reference"])
         self.assertEqual(Payment.objects.count(), 1)
@@ -230,7 +295,7 @@ class PaymentFinalizeSafetyTests(TestCase):
             HTTP_X_TENANT_SLUG=self.tenant.slug,
         )
 
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 201, response.data)
         payment = Payment.objects.get(reference=response.data["reference"])
         self.assertEqual(payment.amount, Decimal("2000.00"))
         self.assertEqual(
@@ -278,7 +343,7 @@ class PaymentFinalizeSafetyTests(TestCase):
             HTTP_X_TENANT_SLUG=self.tenant.slug,
         )
 
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual(response.data["checkout_url"], "https://payments.example.test/checkout")
         payment = Payment.objects.get(reference=response.data["reference"])
         provider_response = json.dumps(payment.provider_response)
@@ -360,7 +425,7 @@ class PaymentFinalizeSafetyTests(TestCase):
             **headers,
         )
 
-        self.assertEqual(first_response.status_code, 201)
+        self.assertEqual(first_response.status_code, 201, first_response.data)
         self.assertEqual(second_response.status_code, 200)
         self.assertEqual(first_response.data["reference"], second_response.data["reference"])
         self.assertEqual(Payment.objects.count(), 1)
@@ -688,6 +753,63 @@ class PaymentFinalizeSafetyTests(TestCase):
         payment.refresh_from_db()
         self.assertEqual(order.status, Order.Status.PENDING)
         self.assertEqual(payment.status, Payment.Status.PROCESSING)
+
+    def test_successful_linked_payment_updates_payment_status_not_order_status(self):
+        order = Order.objects.create(
+            tenant=self.tenant,
+            user=self.user,
+            address=self.address,
+            status=Order.Status.PENDING,
+            slug="pending-paid-order",
+            total_price="1000.00",
+        )
+        payment = Payment.objects.create(
+            tenant=self.tenant,
+            user=self.user,
+            order=order,
+            provider=Payment.Provider.MTN,
+            status=Payment.Status.PROCESSING,
+            amount="1000.00",
+            currency=Payment.Currency.UGX,
+            provider_response={"address_id": self.address.id},
+        )
+
+        payment.status = Payment.Status.PAID
+        payment.save()
+
+        order.refresh_from_db()
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PAID)
+        self.assertEqual(order.status, Order.Status.PENDING)
+        self.assertIsNotNone(payment.paid_at)
+
+    def test_failed_payment_does_not_change_order_status(self):
+        order = Order.objects.create(
+            tenant=self.tenant,
+            user=self.user,
+            address=self.address,
+            status=Order.Status.PENDING,
+            slug="pending-failed-order",
+            total_price="1000.00",
+        )
+        payment = Payment.objects.create(
+            tenant=self.tenant,
+            user=self.user,
+            order=order,
+            provider=Payment.Provider.MTN,
+            status=Payment.Status.PROCESSING,
+            amount="1000.00",
+            currency=Payment.Currency.UGX,
+            provider_response={"address_id": self.address.id},
+        )
+
+        payment.status = Payment.Status.FAILED
+        payment.save()
+
+        order.refresh_from_db()
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.FAILED)
+        self.assertEqual(order.status, Order.Status.PENDING)
 
     def test_finalize_existing_paid_payment_rejects_order_amount_mismatch(self):
         order = Order.objects.create(

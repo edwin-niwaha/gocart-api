@@ -29,7 +29,9 @@ class Order(TimeStampedModel):
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
         AWAITING_PAYMENT = "AWAITING_PAYMENT", "Awaiting payment"
+        CONFIRMED = "CONFIRMED", "Confirmed"
         PROCESSING = "PROCESSING", "Processing"
+        # Legacy compatibility only. New payment events update Payment.status.
         PAID = "PAID", "Paid"
         SHIPPED = "SHIPPED", "Shipped"
         DELIVERED = "DELIVERED", "Delivered"
@@ -274,6 +276,12 @@ class OrderItem(TimeStampedModel):
         decimal_places=2,
         validators=[MinValueValidator(Decimal("0.00"))],
     )
+    cost_price_snapshot = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
 
     class Meta:
         ordering = ["created_at"]
@@ -296,6 +304,20 @@ class OrderItem(TimeStampedModel):
     @property
     def line_total(self) -> Decimal:
         return (self.unit_price or Decimal("0.00")) * (self.quantity or 0)
+
+    @property
+    def line_cost_total(self) -> Decimal:
+        return (self.cost_price_snapshot or Decimal("0.00")) * (self.quantity or 0)
+
+    @property
+    def gross_profit(self) -> Decimal:
+        return self.line_total - self.line_cost_total
+
+    def _snapshot_unit_cost(self) -> Decimal:
+        variant_cost = getattr(self.variant, "unit_cost", Decimal("0.00")) or Decimal("0.00")
+        if variant_cost > Decimal("0.00"):
+            return variant_cost
+        return getattr(self.variant.product, "cost_price", Decimal("0.00")) or Decimal("0.00")
 
     def clean(self) -> None:
         if self.variant_id and self.product_id and self.variant.product_id != self.product_id:
@@ -349,6 +371,8 @@ class OrderItem(TimeStampedModel):
             self.variant_sku = variant.sku
             if self.unit_price is None:
                 self.unit_price = variant.price
+            if not self.cost_price_snapshot:
+                self.cost_price_snapshot = self._snapshot_unit_cost()
         self.full_clean()
         super().save(*args, **kwargs)
 

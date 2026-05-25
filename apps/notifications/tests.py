@@ -55,6 +55,7 @@ class HealthChecksTests(TestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 from apps.notifications.models import Notification
+from apps.notifications.services import send_pending_order_admin_notifications
 from apps.tenants.models import TenantMembership
 
 
@@ -77,6 +78,49 @@ class NotificationBroadcastTests(TestCase):
         )
         self.assertEqual(response.status_code, 201)
         self.assertEqual(Notification.objects.filter(tenant=self.tenant).count(), 2)
+
+
+class PendingOrderAdminNotificationTests(TestCase):
+    def setUp(self):
+        self.customer = User.objects.create_user(email="buyer@example.com", username="buyer", password="pass123456")
+        self.owner = User.objects.create_user(email="owner@example.com", username="owner", password="pass123456")
+        self.admin = User.objects.create_user(email="admin@example.com", username="admin", password="pass123456")
+        self.manager = User.objects.create_user(email="manager@example.com", username="manager", password="pass123456")
+        self.staff = User.objects.create_user(email="staff@example.com", username="staff", password="pass123456")
+        self.tenant = Tenant.objects.create(name="Orders Notify", slug="orders-notify", is_active=True, is_default=True)
+        TenantMembership.objects.create(tenant=self.tenant, user=self.owner, role=TenantMembership.Role.TENANT_OWNER)
+        TenantMembership.objects.create(tenant=self.tenant, user=self.admin, role=TenantMembership.Role.TENANT_ADMIN)
+        TenantMembership.objects.create(tenant=self.tenant, user=self.manager, role=TenantMembership.Role.MANAGER)
+        TenantMembership.objects.create(tenant=self.tenant, user=self.staff, role=TenantMembership.Role.STAFF)
+        self.address = CustomerAddress.objects.create(
+            user=self.customer,
+            street_name="Pending Street",
+            city="Kampala",
+            region=CustomerAddress.Region.KAMPALA_AREA,
+        )
+
+    def test_pending_order_notification_targets_order_admins_only(self):
+        order = Order.objects.create(
+            user=self.customer,
+            tenant=self.tenant,
+            address=self.address,
+            status=Order.Status.PENDING,
+            slug="pending-admin-alert",
+        )
+
+        created = send_pending_order_admin_notifications(order=order)
+
+        self.assertEqual(created, 3)
+        recipients = set(Notification.objects.values_list("user__email", flat=True))
+        self.assertEqual(
+            recipients,
+            {"owner@example.com", "admin@example.com", "manager@example.com"},
+        )
+        notification = Notification.objects.get(user=self.admin)
+        self.assertEqual(notification.notification_type, Notification.NotificationType.ORDER)
+        self.assertEqual(notification.title, "Pending order received")
+        self.assertEqual(notification.data["type"], "pending_order")
+        self.assertEqual(notification.data["order_slug"], order.slug)
 
 
 class NotificationTaskReliabilityTests(TestCase):

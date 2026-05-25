@@ -17,11 +17,6 @@ from apps.common.guest_sessions import get_request_guest_session_key
 from apps.payments.models import Payment
 from apps.payments.services import build_checkout_summary, serialize_checkout_summary
 from apps.promotions.services import apply_coupon_to_order, increment_coupon_usage
-from apps.shipping.services import (
-    get_checkout_shipping_fee,
-    resolve_checkout_delivery_rate,
-    resolve_checkout_shipping_method,
-)
 from apps.tenants.permissions import IsTenantStaff
 from apps.tenants.utils import user_is_tenant_staff
 from .models import Order, OrderItem
@@ -168,9 +163,7 @@ class CheckoutSummaryView(APIView):
                     "delivery_rate_id": None,
                     "estimated_days": None,
                     "shipping_method_id": None,
-                    "pickup_station_id": (
-                        pickup_station.id if pickup_station is not None else None
-                    ),
+                    "pickup_station_id": pickup_station.id if pickup_station is not None else None,
                 },
                 status=status.HTTP_200_OK,
             )
@@ -318,9 +311,6 @@ class OrderViewSet(viewsets.ModelViewSet):
         pickup_station = serializer.validated_data.get("pickup_station")
         coupon_code = serializer.validated_data.get("coupon_code", "")
         tenant = request.tenant
-        shipping_method = resolve_checkout_shipping_method(
-            delivery_option=delivery_option
-        )
         idempotency_key = get_idempotency_key(request)
         is_authenticated = getattr(request.user, "is_authenticated", False)
         guest_session_key = get_request_guest_session_key(
@@ -431,35 +421,27 @@ class OrderViewSet(viewsets.ModelViewSet):
                     unit_price=cart_item.unit_price,
                 )
 
-            items_subtotal = order.recalculate_total_price()
-            discount_amount = Decimal("0.00")
-            applied_coupon = None
-
-            if coupon_code:
-                coupon_result = apply_coupon_to_order(order=order, code=coupon_code)
-                applied_coupon = coupon_result["coupon"]
-                discount_amount = coupon_result["discount"]
-                increment_coupon_usage(coupon=applied_coupon)
-
-            delivery_rate = resolve_checkout_delivery_rate(
-                tenant=tenant,
-                delivery_option=delivery_option,
-                address=address,
-                address_city=serializer.validated_data.get("address_city", ""),
-                address_region=serializer.validated_data.get("address_region", ""),
-                address_area=serializer.validated_data.get("address_area", ""),
-            )
-            shipping_fee = get_checkout_shipping_fee(
+            checkout_summary = build_checkout_summary(
+                cart_items=cart_items,
                 tenant=tenant,
                 delivery_option=delivery_option,
                 pickup_station=pickup_station,
-                shipping_method=shipping_method,
                 address=address,
                 address_city=serializer.validated_data.get("address_city", ""),
                 address_region=serializer.validated_data.get("address_region", ""),
                 address_area=serializer.validated_data.get("address_area", ""),
+                coupon_code=coupon_code,
             )
-            final_total = max(items_subtotal - discount_amount, Decimal("0.00")) + shipping_fee
+            items_subtotal = order.recalculate_total_price()
+            discount_amount = checkout_summary["discount"]
+            applied_coupon = checkout_summary["coupon"]
+
+            if applied_coupon is not None:
+                apply_coupon_to_order(order=order, code=coupon_code)
+                increment_coupon_usage(coupon=applied_coupon)
+
+            shipping_fee = checkout_summary["shipping"]
+            final_total = checkout_summary["total"]
             order.items_subtotal = items_subtotal
             order.discount_amount = discount_amount
             order.shipping_fee = shipping_fee
@@ -474,18 +456,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 ]
             )
 
-            checkout_summary = {
-                "items_subtotal": str(items_subtotal),
-                "discount": str(discount_amount),
-                "shipping": str(shipping_fee),
-                "total": str(final_total),
-                "delivery_option": delivery_option,
-                "coupon_code": applied_coupon.code if applied_coupon is not None else "",
-                "delivery_rate_id": delivery_rate.id if delivery_rate is not None else None,
-                "estimated_days": delivery_rate.estimated_days if delivery_rate is not None else None,
-                "shipping_method_id": shipping_method.id if shipping_method is not None else None,
-                "pickup_station_id": pickup_station.id if pickup_station is not None else None,
-            }
+            serialized_checkout_summary = serialize_checkout_summary(checkout_summary)
 
             payment = Payment.objects.create(
                 tenant=tenant,
@@ -500,7 +471,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                     "payment_method": payment_method,
                     "payment_note": "Pay on delivery selected at checkout",
                     "idempotency_key": idempotency_key,
-                    "checkout_summary": checkout_summary,
+                    "checkout_summary": serialized_checkout_summary,
                 },
             )
 

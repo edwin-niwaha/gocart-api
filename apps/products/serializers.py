@@ -56,6 +56,20 @@ class ProductVariantSerializer(serializers.ModelSerializer):
     product_title = serializers.CharField(source="product.title", read_only=True)
     sku = serializers.CharField(required=False, allow_blank=True)
     is_in_stock = serializers.ReadOnlyField()
+    selling_price = serializers.DecimalField(
+        source="price",
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+    )
+    cost_price = serializers.DecimalField(
+        source="unit_cost",
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+    )
+    gross_profit_amount = serializers.ReadOnlyField()
+    gross_margin_percent = serializers.ReadOnlyField()
 
     class Meta:
         model = ProductVariant
@@ -68,6 +82,11 @@ class ProductVariantSerializer(serializers.ModelSerializer):
             "name",
             "sku",
             "price",
+            "unit_cost",
+            "selling_price",
+            "cost_price",
+            "gross_profit_amount",
+            "gross_margin_percent",
             "stock_quantity",
             "max_quantity_per_order",
             "is_active",
@@ -130,6 +149,8 @@ class ProductSerializer(serializers.ModelSerializer):
 
     base_price = serializers.ReadOnlyField()
     is_in_stock = serializers.ReadOnlyField()
+    gross_profit_amount = serializers.ReadOnlyField()
+    gross_margin_percent = serializers.ReadOnlyField()
 
     average_rating = serializers.SerializerMethodField()
     total_reviews = serializers.SerializerMethodField()
@@ -142,6 +163,10 @@ class ProductSerializer(serializers.ModelSerializer):
             "title",
             "slug",
             "description",
+            "cost_price",
+            "selling_price",
+            "gross_profit_amount",
+            "gross_margin_percent",
             "hero_image",
             "hero_image_url",
             "primary_image",
@@ -169,6 +194,8 @@ class ProductSerializer(serializers.ModelSerializer):
             "is_in_stock",
             "average_rating",
             "total_reviews",
+            "gross_profit_amount",
+            "gross_margin_percent",
         )
         extra_kwargs = {
             "slug": {"required": False},
@@ -229,9 +256,12 @@ class ProductSerializer(serializers.ModelSerializer):
         for item in value:
             name = (item.get("name") or "").strip()
             sku = (item.get("sku") or "").strip()
+            price = item.get("price", item.get("selling_price", None))
 
             if not name:
                 raise serializers.ValidationError("Each variant must have a name.")
+            if price is None:
+                raise serializers.ValidationError(f"Variant {name} must have a selling price.")
 
             normalized_name = name.lower()
             if normalized_name in seen_names:

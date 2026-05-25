@@ -101,15 +101,10 @@ class PaymentAdmin(admin.ModelAdmin):
 
         super().save_model(request, obj, form, change)
 
-        if (
-            obj.order_id
-            and previous_status != Payment.Status.PAID
-            and obj.status == Payment.Status.PAID
-        ):
-            obj.order.refresh_from_db(fields=["status"])
+        if previous_status != Payment.Status.PAID and obj.status == Payment.Status.PAID:
             self.message_user(
                 request,
-                f"Payment {obj.reference} marked as PAID. Order {obj.order.slug} is now {obj.order.status}.",
+                f"Payment {obj.reference} marked as PAID.",
                 level=messages.SUCCESS,
             )
 

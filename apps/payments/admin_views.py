@@ -28,6 +28,11 @@ def is_global_admin(user):
     return getattr(user, "is_superuser", False) or getattr(user, "user_type", None) == "ADMIN"
 
 
+def wants_all_tenants(request) -> bool:
+    value = str(request.query_params.get("all_tenants", "")).strip().lower()
+    return value in {"1", "true", "yes", "all"}
+
+
 class AdminPaymentListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = AdminPaymentSerializer
@@ -40,9 +45,17 @@ class AdminPaymentListView(generics.ListAPIView):
             "user", "order", "tenant"
         ).order_by("-created_at")
 
-        # Global admin can see everything
+        # Even global admins default to the active tenant because the dashboard
+        # tenant guard rejects mixed-tenant list responses. They can opt into a
+        # cross-tenant export/API view with ?all_tenants=true.
+        if tenant is not None:
+            queryset = queryset.filter(tenant=tenant)
+
         if is_global_admin(user):
-            pass
+            if wants_all_tenants(self.request):
+                queryset = Payment.objects.select_related(
+                    "user", "order", "tenant"
+                ).order_by("-created_at")
         else:
             membership = get_user_active_membership(user, tenant=tenant)
             allowed_roles = {
@@ -95,8 +108,9 @@ class AdminPaymentDetailView(APIView):
 
         queryset = Payment.objects.select_related("order", "tenant", "user")
 
-        # Global admin can access any payment
         if is_global_admin(user):
+            if tenant is not None and not wants_all_tenants(request):
+                queryset = queryset.filter(tenant=tenant)
             return queryset.filter(pk=pk).first()
 
         membership = get_user_active_membership(user, tenant=tenant)
@@ -116,7 +130,6 @@ class AdminPaymentDetailView(APIView):
         payment = self.get_payment(request, pk)
         if not payment:
             raise NotFound("Payment not found.")
-
         serializer = AdminPaymentSerializer(
             payment,
             data=request.data,

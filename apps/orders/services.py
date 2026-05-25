@@ -13,10 +13,12 @@ from apps.tenants.models import Tenant
 from .models import Order, OrderItem, OrderStatusEvent
 
 ALLOWED_STATUS_TRANSITIONS = {
-    Order.Status.PENDING: {Order.Status.AWAITING_PAYMENT, Order.Status.PROCESSING, Order.Status.CANCELLED},
-    Order.Status.AWAITING_PAYMENT: {Order.Status.PAID, Order.Status.CANCELLED},
-    Order.Status.PROCESSING: {Order.Status.PAID, Order.Status.SHIPPED, Order.Status.CANCELLED},
-    Order.Status.PAID: {Order.Status.PROCESSING, Order.Status.SHIPPED, Order.Status.REFUNDED},
+    Order.Status.PENDING: {Order.Status.AWAITING_PAYMENT, Order.Status.CONFIRMED, Order.Status.PROCESSING, Order.Status.DELIVERED, Order.Status.CANCELLED},
+    Order.Status.AWAITING_PAYMENT: {Order.Status.PENDING, Order.Status.CONFIRMED, Order.Status.PAID, Order.Status.DELIVERED, Order.Status.CANCELLED},
+    Order.Status.CONFIRMED: {Order.Status.PROCESSING, Order.Status.SHIPPED, Order.Status.DELIVERED, Order.Status.CANCELLED},
+    Order.Status.PROCESSING: {Order.Status.PAID, Order.Status.SHIPPED, Order.Status.DELIVERED, Order.Status.CANCELLED},
+    # PAID is a legacy order status. Keep it accepted for older API clients; new UI should use Payment.status.
+    Order.Status.PAID: {Order.Status.CONFIRMED, Order.Status.PROCESSING, Order.Status.SHIPPED, Order.Status.DELIVERED, Order.Status.REFUNDED},
     Order.Status.SHIPPED: {Order.Status.DELIVERED, Order.Status.REFUNDED},
     Order.Status.DELIVERED: {Order.Status.REFUNDED},
     Order.Status.CANCELLED: set(),
@@ -183,4 +185,21 @@ def transition_order_status(*, order: Order, new_status: str, changed_by=None, n
         target=order,
         metadata={"from": current_status, "to": new_status, "note": note},
     )
+    if new_status == Order.Status.PAID:
+        from apps.accounting.posting import (
+            queue_order_paid_accounting_event,
+            should_post_order_revenue_on_payment,
+        )
+
+        if should_post_order_revenue_on_payment(order):
+            queue_order_paid_accounting_event(order)
+    elif new_status == Order.Status.DELIVERED:
+        from apps.accounting.posting import (
+            queue_order_paid_accounting_event,
+            order_has_paid_payment,
+            should_post_order_revenue_on_delivery,
+        )
+
+        if should_post_order_revenue_on_delivery(order) and order_has_paid_payment(order):
+            queue_order_paid_accounting_event(order)
     return order
